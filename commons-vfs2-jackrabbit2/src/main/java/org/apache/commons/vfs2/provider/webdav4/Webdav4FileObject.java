@@ -16,16 +16,6 @@
  */
 package org.apache.commons.vfs2.provider.webdav4;
 
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URISyntaxException;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-
 import org.apache.commons.vfs2.FileContentInfoFactory;
 import org.apache.commons.vfs2.FileNotFolderException;
 import org.apache.commons.vfs2.FileNotFoundException;
@@ -47,8 +37,8 @@ import org.apache.http.client.methods.HttpPut;
 import org.apache.http.client.methods.HttpRequestBase;
 import org.apache.http.client.methods.HttpUriRequest;
 import org.apache.http.client.utils.DateUtils;
-import org.apache.http.entity.ByteArrayEntity;
 import org.apache.http.entity.ContentType;
+import org.apache.http.entity.InputStreamEntity;
 import org.apache.jackrabbit.webdav.DavConstants;
 import org.apache.jackrabbit.webdav.DavException;
 import org.apache.jackrabbit.webdav.MultiStatus;
@@ -73,161 +63,43 @@ import org.apache.jackrabbit.webdav.version.VersionControlledResource;
 import org.apache.jackrabbit.webdav.xml.Namespace;
 import org.w3c.dom.Node;
 
+import java.io.IOException;
+import java.io.OutputStream;
+import java.io.PipedInputStream;
+import java.io.PipedOutputStream;
+import java.net.HttpURLConnection;
+import java.net.URISyntaxException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+
 /**
  * A WebDAV file.
  *
  * @since 2.5.0
  */
 public class Webdav4FileObject extends Http4FileObject<Webdav4FileSystem> {
+
     /**
-     * An OutputStream that writes to a Webdav resource.
-     * <p>
-     * TODO - Use piped stream to avoid temporary file.
+     * The character set property name.
      */
-    private class WebdavOutputStream extends MonitorOutputStream {
-        private final Webdav4FileObject file;
-
-        public WebdavOutputStream(final Webdav4FileObject file) {
-            super(new ByteArrayOutputStream());
-            this.file = file;
-        }
-
-        private boolean createVersion(final String urlStr) {
-            try {
-                final HttpVersionControl request = new HttpVersionControl(urlStr);
-                setupRequest(request);
-                executeRequest(request);
-                return true;
-            } catch (final Exception ex) {
-                return false;
-            }
-        }
-
-        /**
-         * Called after this stream is closed.
-         */
-        @Override
-        protected void onClose() throws IOException {
-            final HttpEntity entity = new ByteArrayEntity(((ByteArrayOutputStream) out).toByteArray());
-            final GenericURLFileName fileName = (GenericURLFileName) getName();
-            final String urlStr = toUrlString(fileName);
-            if (builder.isVersioning(getFileSystem().getFileSystemOptions())) {
-                DavPropertySet set = null;
-                boolean fileExists = true;
-                boolean isCheckedIn = true;
-                try {
-                    set = getPropertyNames(fileName);
-                } catch (final FileNotFoundException fnfe) {
-                    fileExists = false;
-                }
-                if (fileExists && set != null) {
-                    if (set.contains(VersionControlledResource.CHECKED_OUT)) {
-                        isCheckedIn = false;
-                    } else if (!set.contains(VersionControlledResource.CHECKED_IN)) {
-                        DavProperty prop = set.get(VersionControlledResource.AUTO_VERSION);
-                        if (prop != null) {
-                            prop = getProperty(fileName, VersionControlledResource.AUTO_VERSION);
-                            if (DeltaVConstants.XML_CHECKOUT_CHECKIN.equals(prop.getValue())) {
-                                createVersion(urlStr);
-                            }
-                        }
-                    }
-                }
-                if (fileExists && isCheckedIn) {
-                    try {
-                        final HttpCheckout request = new HttpCheckout(urlStr);
-                        setupRequest(request);
-                        executeRequest(request);
-                        isCheckedIn = false;
-                    } catch (final FileSystemException ex) {
-                        // Ignore the exception checking out.
-                    }
-                }
-
-                try {
-                    final HttpPut request = new HttpPut(urlStr);
-                    request.setEntity(entity);
-                    setupRequest(request);
-                    executeRequest(request);
-                    setUserName(fileName, urlStr);
-                } catch (final FileSystemException ex) {
-                    if (!isCheckedIn) {
-                        try {
-                            final HttpCheckin request = new HttpCheckin(urlStr);
-                            setupRequest(request);
-                            executeRequest(request);
-                            isCheckedIn = true;
-                        } catch (final Exception e) {
-                            // Ignore the exception. Going to throw original.
-                        }
-                        throw ex;
-                    }
-                }
-                if (!fileExists) {
-                    createVersion(urlStr);
-                    try {
-                        final DavPropertySet props = getPropertyNames(fileName);
-                        isCheckedIn = !props.contains(VersionControlledResource.CHECKED_OUT);
-                    } catch (final FileNotFoundException fnfe) {
-                        // Ignore the error
-                    }
-                }
-                if (!isCheckedIn) {
-                    final HttpCheckin request = new HttpCheckin(urlStr);
-                    setupRequest(request);
-                    executeRequest(request);
-                }
-            } else {
-                final HttpPut request = new HttpPut(urlStr);
-                request.setEntity(entity);
-                setupRequest(request);
-                executeRequest(request);
-                try {
-                    setUserName(fileName, urlStr);
-                } catch (final IOException e) {
-                    // Ignore the exception if unable to set the user name.
-                }
-            }
-            ((DefaultFileContent) this.file.getContent()).resetAttributes();
-        }
-
-        private void setUserName(final GenericURLFileName fileName, final String urlStr) throws IOException {
-            final DavPropertySet setProperties = new DavPropertySet();
-            final DavPropertyNameSet removeProperties = new DavPropertyNameSet();
-            String name = builder.getCreatorName(getFileSystem().getFileSystemOptions());
-            final String userName = fileName.getUserName();
-            if (name == null) {
-                name = userName;
-            } else {
-                if (userName != null) {
-                    final String comment = "Modified by user " + userName;
-                    setProperties.add(new DefaultDavProperty(DeltaVConstants.COMMENT, comment));
-                }
-            }
-            setProperties.add(new DefaultDavProperty(DeltaVConstants.CREATOR_DISPLAYNAME, name));
-            final HttpProppatch request = new HttpProppatch(urlStr, setProperties, removeProperties);
-            setupRequest(request);
-            executeRequest(request);
-        }
-    }
-
-    /** The character set property name. */
     public static final DavPropertyName RESPONSE_CHARSET = DavPropertyName.create("response-charset");
-
-    /** The FileSystemConfigBuilder */
+    /**
+     * The FileSystemConfigBuilder
+     */
     private final Webdav4FileSystemConfigBuilder builder;
-
     private final Webdav4FileSystem fileSystem;
-
     private final String requestScheme;
 
     protected Webdav4FileObject(final AbstractFileName name, final Webdav4FileSystem fileSystem, final boolean ssl)
-            throws FileSystemException, URISyntaxException {
+        throws FileSystemException, URISyntaxException {
         this(name, fileSystem, ssl, Webdav4FileSystemConfigBuilder.getInstance());
     }
 
     protected Webdav4FileObject(final AbstractFileName name, final Webdav4FileSystem fileSystem, final boolean ssl,
-            final Webdav4FileSystemConfigBuilder builder) throws FileSystemException, URISyntaxException {
+        final Webdav4FileSystemConfigBuilder builder) throws FileSystemException, URISyntaxException {
         super(name, fileSystem, builder);
         this.fileSystem = fileSystem;
         this.builder = builder;
@@ -243,7 +115,8 @@ public class Webdav4FileObject extends Http4FileObject<Webdav4FileSystem> {
         setupRequest(request);
         try {
             executeRequest(request);
-        } catch (final FileSystemException fse) {
+        }
+        catch (final FileSystemException fse) {
             throw new FileSystemException("vfs.provider.webdav/create-collection.error", getName(), fse);
         }
     }
@@ -267,7 +140,7 @@ public class Webdav4FileObject extends Http4FileObject<Webdav4FileSystem> {
         try {
             final GenericURLFileName fileName = (GenericURLFileName) getName();
             DavPropertySet properties = getProperties(fileName, DavConstants.PROPFIND_ALL_PROP,
-                    new DavPropertyNameSet(), false);
+                                                      new DavPropertyNameSet(), false);
             final DavPropertyIterator iter = properties.iterator();
             while (iter.hasNext()) {
                 final DavProperty property = iter.nextProperty();
@@ -289,7 +162,8 @@ public class Webdav4FileObject extends Http4FileObject<Webdav4FileSystem> {
                 }
             }
             return attributes;
-        } catch (final Exception e) {
+        }
+        catch (final Exception e) {
             throw new FileSystemException("vfs.provider.webdav/get-attributes.error", getName(), e);
         }
     }
@@ -323,7 +197,7 @@ public class Webdav4FileObject extends Http4FileObject<Webdav4FileSystem> {
 
     @Override
     protected OutputStream doGetOutputStream(final boolean bAppend) throws Exception {
-        return new WebdavOutputStream(this);
+        return new WebdavOutputStream();
     }
 
     /**
@@ -334,12 +208,13 @@ public class Webdav4FileObject extends Http4FileObject<Webdav4FileSystem> {
     protected FileType doGetType() throws Exception {
         try {
             return isDirectory((GenericURLFileName) getName()) ? FileType.FOLDER : FileType.FILE;
-        } catch (final FileNotFolderException fnfe) {
-            return FileType.IMAGINARY;
-        } catch (final FileNotFoundException fnfe) {
+        }
+        catch (final FileNotFolderException fnfe) {
             return FileType.IMAGINARY;
         }
-
+        catch (final FileNotFoundException fnfe) {
+            return FileType.IMAGINARY;
+        }
     }
 
     /**
@@ -349,6 +224,7 @@ public class Webdav4FileObject extends Http4FileObject<Webdav4FileSystem> {
      * This implementation always returns true.
      *
      * @return true if the file is writable.
+     *
      * @throws Exception if an error occurs.
      */
     @Override
@@ -391,8 +267,8 @@ public class Webdav4FileObject extends Http4FileObject<Webdav4FileSystem> {
                         final String resourceName = resourceName(response.getHref());
                         if (resourceName != null && resourceName.length() > 0) {
                             final Webdav4FileObject fo = (Webdav4FileObject) FileObjectUtils.getAbstractFileObject(
-                                    getFileSystem().resolveFile(getFileSystem().getFileSystemManager()
-                                            .resolveName(getName(), resourceName, NameScope.CHILD)));
+                                getFileSystem().resolveFile(getFileSystem().getFileSystemManager()
+                                                                           .resolveName(getName(), resourceName, NameScope.CHILD)));
                             vfs.add(fo);
                         }
                     }
@@ -400,13 +276,17 @@ public class Webdav4FileObject extends Http4FileObject<Webdav4FileSystem> {
                 return vfs.toArray(new Webdav4FileObject[vfs.size()]);
             }
             throw new FileNotFolderException(getName());
-        } catch (final FileNotFolderException fnfe) {
+        }
+        catch (final FileNotFolderException fnfe) {
             throw fnfe;
-        } catch (final DavException e) {
+        }
+        catch (final DavException e) {
             throw new FileSystemException(e.getMessage(), e);
-        } catch (final IOException e) {
+        }
+        catch (final IOException e) {
             throw new FileSystemException(e.getMessage(), e);
-        } finally {
+        }
+        finally {
             if (request != null) {
                 request.releaseConnection();
             }
@@ -438,7 +318,8 @@ public class Webdav4FileObject extends Http4FileObject<Webdav4FileSystem> {
             final DavProperty property = new DefaultDavProperty(attrName, value, Namespace.EMPTY_NAMESPACE);
             if (value != null) {
                 properties.add(property);
-            } else {
+            }
+            else {
                 propertyNameSet.add(property.getName()); // remove property
             }
 
@@ -448,9 +329,11 @@ public class Webdav4FileObject extends Http4FileObject<Webdav4FileSystem> {
             if (!request.succeeded(response)) {
                 throw new FileSystemException("Property '" + attrName + "' could not be set.");
             }
-        } catch (final FileSystemException fse) {
+        }
+        catch (final FileSystemException fse) {
             throw fse;
-        } catch (final Exception e) {
+        }
+        catch (final Exception e) {
             throw new FileSystemException("vfs.provider.webdav/set-attributes", e, getName(), attrName);
         }
     }
@@ -470,13 +353,17 @@ public class Webdav4FileObject extends Http4FileObject<Webdav4FileSystem> {
             }
 
             return response;
-        } catch (final FileSystemException fse) {
+        }
+        catch (final FileSystemException fse) {
             throw fse;
-        } catch (final IOException e) {
+        }
+        catch (final IOException e) {
             throw new FileSystemException(e);
-        } catch (final DavException e) {
+        }
+        catch (final DavException e) {
             throw ExceptionConverter.generate(e);
-        } finally {
+        }
+        finally {
             if (request instanceof HttpRequestBase) {
                 ((HttpRequestBase) request).releaseConnection();
             }
@@ -493,12 +380,12 @@ public class Webdav4FileObject extends Http4FileObject<Webdav4FileSystem> {
     }
 
     DavPropertySet getProperties(final GenericURLFileName name, final DavPropertyNameSet nameSet, final boolean addEncoding)
-            throws FileSystemException {
+        throws FileSystemException {
         return getProperties(name, DavConstants.PROPFIND_BY_PROPERTY, nameSet, addEncoding);
     }
 
     DavPropertySet getProperties(final GenericURLFileName name, final int type, final DavPropertyNameSet nameSet,
-            final boolean addEncoding) throws FileSystemException {
+        final boolean addEncoding) throws FileSystemException {
         try {
             final String urlStr = toUrlString(name);
             final HttpPropfind request = new HttpPropfind(urlStr, type, nameSet, DavConstants.DEPTH_0);
@@ -511,17 +398,19 @@ public class Webdav4FileObject extends Http4FileObject<Webdav4FileSystem> {
                 if (addEncoding) {
                     final ContentType resContentType = ContentType.getOrDefault(res.getEntity());
                     final DavProperty prop = new DefaultDavProperty(RESPONSE_CHARSET,
-                            resContentType.getCharset().name());
+                                                                    resContentType.getCharset().name());
                     props.add(prop);
                 }
                 return props;
             }
             return new DavPropertySet();
-        } catch (final FileSystemException fse) {
+        }
+        catch (final FileSystemException fse) {
             throw fse;
-        } catch (final Exception e) {
+        }
+        catch (final Exception e) {
             throw new FileSystemException("vfs.provider.webdav/get-property.error", e, getName(), name, type,
-                    nameSet.getContent(), addEncoding);
+                                          nameSet.getContent(), addEncoding);
         }
     }
 
@@ -548,10 +437,11 @@ public class Webdav4FileObject extends Http4FileObject<Webdav4FileSystem> {
      */
     private String hrefString(final GenericURLFileName name) {
         final GenericURLFileName newFile = new GenericURLFileName("http", name.getHostName(), name.getPort(), name.getDefaultPort(),
-                null, null, name.getPath(), name.getType(), name.getQueryString());
+                                                                  null, null, name.getPath(), name.getType(), name.getQueryString());
         try {
             return newFile.getURIEncoded(this.getUrlCharset());
-        } catch (final Exception e) {
+        }
+        catch (final Exception e) {
             return name.getURI();
         }
     }
@@ -572,7 +462,8 @@ public class Webdav4FileObject extends Http4FileObject<Webdav4FileSystem> {
                 return node.getLocalName().equals(DavConstants.XML_COLLECTION);
             }
             return false;
-        } catch (final FileNotFoundException fse) {
+        }
+        catch (final FileNotFoundException fse) {
             throw new FileNotFolderException(name);
         }
     }
@@ -606,7 +497,7 @@ public class Webdav4FileObject extends Http4FileObject<Webdav4FileSystem> {
     /**
      * Converts the given URLFileName to an encoded URL String.
      *
-     * @param name The FileName.
+     * @param name            The FileName.
      * @param includeUserInfo true if user information should be included.
      * @return The encoded URL String.
      */
@@ -618,11 +509,193 @@ public class Webdav4FileObject extends Http4FileObject<Webdav4FileSystem> {
             password = name.getPassword();
         }
         final GenericURLFileName newFile = new GenericURLFileName(requestScheme, name.getHostName(), name.getPort(), name.getDefaultPort(),
-                user, password, name.getPath(), name.getType(), name.getQueryString());
+                                                                  user, password, name.getPath(), name.getType(), name.getQueryString());
         try {
             return newFile.getURIEncoded(this.getUrlCharset());
-        } catch (final Exception e) {
+        }
+        catch (final Exception e) {
             return name.getURI();
+        }
+    }
+
+    /**
+     * An OutputStream that writes to a Webdav resource.
+     * <p>
+     * TODO - Use piped stream to avoid temporary file.
+     */
+    private class WebdavOutputStream extends MonitorOutputStream {
+
+        private final Thread writeThread;
+        private final PipedInputStream pipedIn = new PipedInputStream();
+
+        public WebdavOutputStream() throws IOException {
+            super(new PipedOutputStream());
+
+            final PipedOutputStream pipedOut = (PipedOutputStream) out;
+            pipedOut.connect(pipedIn);
+
+            // content length unkown -1 prevents buffering
+            final HttpEntity requestEntity = new InputStreamEntity(pipedIn, -1);
+
+            // Start the reading from the piped input stream from a different thread to prevent deadlocks
+            writeThread = new Thread(() -> {
+                try {
+                    writeWebdavFile(requestEntity);
+                }
+                catch (IOException exception) {
+                    throw new RuntimeException(exception);
+                }
+                finally {
+                    try {
+                        pipedIn.close();
+                    }
+                    catch (IOException exception) {
+                        throw new RuntimeException(exception);
+                    }
+                }
+            }, "VFS WebDav piped stream");
+
+            writeThread.start();
+        }
+
+        private boolean createVersion(final String urlStr) {
+            try {
+                final HttpVersionControl request = new HttpVersionControl(urlStr);
+                setupRequest(request);
+                executeRequest(request);
+                return true;
+            }
+            catch (final Exception ex) {
+                return false;
+            }
+        }
+
+        /**
+         * Called after this stream is closed.
+         */
+        @Override
+        public void close() throws IOException {
+            try {
+                this.flush();
+                this.out.close();
+                writeThread.join(TimeUnit.SECONDS.toMillis(30));
+            }
+            catch (InterruptedException e) {
+                throw new IOException(e);
+            }
+            finally {
+                super.close();
+            }
+        }
+
+        private void writeWebdavFile(HttpEntity entity) throws IOException {
+            final GenericURLFileName fileName = (GenericURLFileName) getName();
+            final String urlStr = toUrlString(fileName);
+            if (builder.isVersioning(getFileSystem().getFileSystemOptions())) {
+                DavPropertySet set = null;
+                boolean fileExists = true;
+                boolean isCheckedIn = true;
+                try {
+                    set = getPropertyNames(fileName);
+                }
+                catch (final FileNotFoundException fnfe) {
+                    fileExists = false;
+                }
+                if (fileExists && set != null) {
+                    if (set.contains(VersionControlledResource.CHECKED_OUT)) {
+                        isCheckedIn = false;
+                    }
+                    else if (!set.contains(VersionControlledResource.CHECKED_IN)) {
+                        DavProperty prop = set.get(VersionControlledResource.AUTO_VERSION);
+                        if (prop != null) {
+                            prop = getProperty(fileName, VersionControlledResource.AUTO_VERSION);
+                            if (DeltaVConstants.XML_CHECKOUT_CHECKIN.equals(prop.getValue())) {
+                                createVersion(urlStr);
+                            }
+                        }
+                    }
+                }
+                if (fileExists && isCheckedIn) {
+                    try {
+                        final HttpCheckout request = new HttpCheckout(urlStr);
+                        setupRequest(request);
+                        executeRequest(request);
+                        isCheckedIn = false;
+                    }
+                    catch (final FileSystemException ex) {
+                        // Ignore the exception checking out.
+                    }
+                }
+
+                try {
+                    final HttpPut request = new HttpPut(urlStr);
+                    request.setEntity(entity);
+                    setupRequest(request);
+                    executeRequest(request);
+                    setUserName(fileName, urlStr);
+                }
+                catch (final FileSystemException ex) {
+                    if (!isCheckedIn) {
+                        try {
+                            final HttpCheckin request = new HttpCheckin(urlStr);
+                            setupRequest(request);
+                            executeRequest(request);
+                            isCheckedIn = true;
+                        }
+                        catch (final Exception e) {
+                            // Ignore the exception. Going to throw original.
+                        }
+                        throw ex;
+                    }
+                }
+                if (!fileExists) {
+                    createVersion(urlStr);
+                    try {
+                        final DavPropertySet props = getPropertyNames(fileName);
+                        isCheckedIn = !props.contains(VersionControlledResource.CHECKED_OUT);
+                    }
+                    catch (final FileNotFoundException fnfe) {
+                        // Ignore the error
+                    }
+                }
+                if (!isCheckedIn) {
+                    final HttpCheckin request = new HttpCheckin(urlStr);
+                    setupRequest(request);
+                    executeRequest(request);
+                }
+            }
+            else {
+                final HttpPut request = new HttpPut(urlStr);
+                request.setEntity(entity);
+                setupRequest(request);
+                executeRequest(request);
+                try {
+                    setUserName(fileName, urlStr);
+                }
+                catch (final IOException e) {
+                    // Ignore the exception if unable to set the user name.
+                }
+            }
+        }
+
+        private void setUserName(final GenericURLFileName fileName, final String urlStr) throws IOException {
+            final DavPropertySet setProperties = new DavPropertySet();
+            final DavPropertyNameSet removeProperties = new DavPropertyNameSet();
+            String name = builder.getCreatorName(getFileSystem().getFileSystemOptions());
+            final String userName = fileName.getUserName();
+            if (name == null) {
+                name = userName;
+            }
+            else {
+                if (userName != null) {
+                    final String comment = "Modified by user " + userName;
+                    setProperties.add(new DefaultDavProperty(DeltaVConstants.COMMENT, comment));
+                }
+            }
+            setProperties.add(new DefaultDavProperty(DeltaVConstants.CREATOR_DISPLAYNAME, name));
+            final HttpProppatch request = new HttpProppatch(urlStr, setProperties, removeProperties);
+            setupRequest(request);
+            executeRequest(request);
         }
     }
 }
